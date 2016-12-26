@@ -2,7 +2,7 @@
 
 Today I found a challenge for myself. Some Travis users want to use Ubuntu
 16.04, but now Ubuntu 14.04 is only available there
-(https://github.com/travis-ci/travis-ci/issues/5821). Initially I thought I’d
+[https://github.com/travis-ci/travis-ci/issues/5821](https://github.com/travis-ci/travis-ci/issues/5821). Initially I thought I’d
 spend one hour on this, but it ended up being a whole day project, so I decided
 to share my experience.
 
@@ -246,11 +246,11 @@ index 12f13ae..39277cf 100644
 Now we can open a bottle of fine champagne, pour a glass, and watch how our
 Travis job works for the first time!!! See, it works:
 
-(https://travis-ci.org/avagin/criu/builds/181822758)
+[https://travis-ci.org/avagin/criu/builds/181822758](https://travis-ci.org/avagin/criu/builds/181822758)
 
 Well, to tell you the truth it was a very brief version of the story. In
 reality, I tried 33 times before it worked. Anyway, let’s drink to the happy
 ending!
 
 ---
-Authored by: @avagin and @kolyshkin
+Authored by: @avagin and [@kolyshkin](https://github.com/kolyshkin)
