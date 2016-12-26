@@ -251,3 +251,6 @@ Travis job works for the first time!!! See, it works:
 Well, to tell you the truth it was a very brief version of the story. In
 reality, I tried 33 times before it worked. Anyway, let’s drink to the happy
 ending!
+
+---
+Authored by: @avagin and @kolyshkin
