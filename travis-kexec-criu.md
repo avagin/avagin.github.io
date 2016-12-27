@@ -1,11 +1,11 @@
 # Upgrade a Travis VM to Ubuntu 16.04 on the fly
 
 Today I found a challenge for myself. Some Travis users want to use Ubuntu
-16.04, but now Ubuntu 14.04 is only available there
-[https://github.com/travis-ci/travis-ci/issues/5821](https://github.com/travis-ci/travis-ci/issues/5821). Initially I thought I’d
+16.04, but for now Ubuntu 14.04 is the only one available (see
+[https://github.com/travis-ci/travis-ci/issues/5821](https://github.com/travis-ci/travis-ci/issues/5821)).
+Initially I thought I’d
 spend one hour on this, but it ended up being a whole day project, so I decided
 to share my experience.
-
 
 From the first sight, it’s trivial to update all the packages:
 
@@ -14,15 +14,14 @@ sed -i -e "s/trusty/xenial/g" /etc/apt/sources.list
 apt-get update && apt-get dist-upgrade -y
 ```
 
-But when a system needs to be rebooted. The problem is, once rebooted, Travis is
-losing the VM. Travis as it runs a control process via ssh, and this process is
+But when a system needs a reboot. The problem is, once rebooted, Travis is
+losing the VM -- it runs a control process via ssh, and this process is
 not supposed to be stopped. So, the key to success is to find a way to not
 destroy this ssh session with Travis control process. This is where CRIU can
 help us! We can try to checkpoint the ssh session, reboot the system, and
 restore the session back. Is it challenging? As usual, the devil is in details.
 
-
-First of all, we need to get the PID for the root process in the session. Here’s
+First of all, we need to get the PID of the root process in the session. Here is
 the process tree:
 
 ```
@@ -50,20 +49,20 @@ Now we are ready to dump the travis session:
 
 ```
 ./criu/criu dump -D /imgs -o dump.log -t $pid --tcp-established \
---ext-unix-sk -v4 --file-locks --link-remap
+    --ext-unix-sk -v4 --file-locks --link-remap
 ```
 
-The --tcp-established option is required because Travis is connected to the VM
-via ssh. The --link-remap is required to restore unlinked files. We are going to
-update all packages in the system, but the Travis process will continue to use
-old libraries, so they have to be restored as ghost files. The --ext-unix-sk is
-required to handle the dbus socket (see details below).
-
+The ``--tcp-established`` option is required because Travis is connected to the VM
+via ssh. The ``--link-remap`` is required to restore unlinked files. We are going to
+update all the packages in the system, but the Travis process will continue to use
+old files (shared libraries and any other opened files), so those removed but opened
+files have to be restored as ghost files. The ``--ext-unix-sk`` is
+required to handle the dbus socket (more on that later).
 
 We are going to dump a TCP connection, and for that we need to block all the
 network packets of this connection until a Travis process is restored. CRIU dump
-will add a few iptables rules for this, and we will have to restore them back
-when a system will be booted into a new kernel.
+will add a few iptables rules for this, and we have to restore them back
+once a system is booted into a new kernel.
 
 ```
 cat > /etc/network/if-pre-up.d/iptablesload << EOF
@@ -105,9 +104,9 @@ kexec -l /boot/vmlinuz-$kernel --initrd=/boot/initrd.img-$kernel --reuse-cmdline
 
 The new system uses systemd and executes more processes than a previous one. Can
 it be a problem? CRIU can restore processes only with the same PIDs, but in the
-new system some of them can already be used by other processes. This can be
-fixed if we will restore processes in a new PID namespace. Later we will be able
-to switch back into the root PID namespace by using the nsenter tool.
+new system some of them can already be used by other processes. A workaround is
+to restore processes in a new PID namespace, and switch back into the root
+PID namespace later by using the nsenter tool.
 
 ```
 unshare -pfm --mount-proc --propagation=private ./criu/criu restore \
@@ -164,7 +163,6 @@ new devpts with the newinstance options, but it was deprecated in new kernels:
 >       Ignored.
 > // Eric W. Biederman
 
-
 Woo hoo! Now it’s time to patch CRIU image files. We need to change PTY indexes
 in tty-info.img and also fix paths to terminals in reg-files.img. For image
 editing, let’s use CRIT tool, which can decode binary CRIU images to JSON, and
@@ -180,7 +178,7 @@ encode from JSON back to binary. For simple JSON editing, sed is sufficient.
 ```
 
 With this in place, let’s try again for the third time. Now we find an external
-FIFO in /run/systemd/sessions. I know absolutely nothing about it and how it  is
+FIFO in /run/systemd/sessions. I know absolutely nothing about it and how it is
 used, but when a new kernel is booted, we need to create this FIFO so restore
 won’t block.
 
