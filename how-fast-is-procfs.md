@@ -399,19 +399,19 @@ critical when a system is under memory pressure. Let’s compare how many kernel
 allocations are occurred for procfs and task-diag.
 
 ```
-$ perf trace --event 'kmem:*alloc*'  ./task_proc_all status 2>&1 | wc -l
-3376
-$ perf trace --event 'kmem:*alloc*'  ./task_diag_all all -q 2>&1 | wc -l
-245
+$ perf trace --event 'kmem:*alloc*'  ./task_proc_all status 2>&1 | grep kmem | wc -l
+58184
+$ perf trace --event 'kmem:*alloc*'  ./task_diag_all all  -q 2>&1 | grep kmem | wc -l
+188
 ```
 
 And we need to know how many allocations are required to run a trivial process.
 ```
-$ perf trace --event 'kmem:*alloc*'  true 2>&1 | wc -l
-190
+$ perf trace --event 'kmem:*alloc*'  true 2>&1  | grep kmem | wc -l
+94
 ```
 
-Procfs requires 50 times more in-kernel memory allocations than the task diag
+Procfs requires 600 times more in-kernel memory allocations than the task diag
 interface. It is just another point why procfs works so slow in critical
 situations, and there is a room for optimization.
 
@@ -424,6 +424,7 @@ develop and improve the task diag interface.
 
 # Links
 
+* https://github.com/avagin/linux-task-diag/tree/v4.16-task-diag-20180427/tools/testing/selftests/task_diag
 * https://lwn.net/Articles/685791/
 * https://www.slideshare.net/KirKolyshkin/time-to-rethink-proc
 * https://www.slideshare.net/kolyshkin/speeding-up-ps-and-top
