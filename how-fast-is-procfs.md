@@ -449,5 +449,5 @@ develop and improve the task diag interface.
 * [github.com/avagin/linux-task-diag](https://github.com/avagin/linux-task-diag/releases/tag/v4.19-task-diag)
 
 # Authors
-* [Andrei Vagin](github.com/avagin/linux-task-diag)
+* [Andrei Vagin](https://github.com/avagin/linux-task-diag)
 * [Kir Kolyshkin](https://github.com/kolyshkin)
