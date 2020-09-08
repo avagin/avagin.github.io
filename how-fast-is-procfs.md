@@ -5,30 +5,36 @@ provides information about processes. It is one of the interfaces which follows
 the “Everything is a file” paradigm. The procfs file system was designed a long
 time ago, when an average system ran no more than a few hundred processes. At
 that time it was not a problem to open one or several proc files per each
-process to get some information. In our days, a system can have hundreds of
+process to get some information. Nowadays, a system can have hundreds of
 thousands of processes or even more. In this context, the idea to perform
 per-process open doesn’t look so brilliant. In this article, we are going to
-explore all aspects of procfs, and find which ones can be optimized.
+explore all aspects of procfs, and find out which ones can be optimized.
 
 The idea to optimize the proc file system came when we found that CRIU, the
 software to checkpoint/restore processes, spends a significant amount of time
 reading procfs files. We have seen how a similar problem had been solved for
-sockets, so we decided to implement something like sock-diag for processes. We
-understood how hard it is to change a very mature interface in the kernel, but
+sockets, so we decided to implement something similar to sock-diag but for processes.
+
+We understood how hard it is to change a very mature interface in the kernel, but
 the biggest surprise was how many kernel developers support the idea of a new
-interface. They don’t know how a new interface should look like, but they all
-know that the existing solution doesn’t work well in critical situations. It
-often like this: a server becomes laggy, vmstat shows lots of swap used, “ps
-ax” needs 10+ seconds to show something, and top never comes up with any
-output. This article doesn’t propose any specific interface; instead it tries
+interface. They don’t know how a new interface should look like, but they are
+aware that the existing solution doesn’t work well in critical situations.
+
+We have seen this many times: a server becomes laggy, vmstat shows lots of swap used,
+`ps ax` needs 10+ seconds to show something, and `top` never comes up with any
+output.
+
+This article doesn’t propose any specific interface; instead it tries
 to give more details about the problem, and suggest ways to fix it.
 
-In procfs, each running process is represented by a directory /proc/<pid>. Each
+## Current /proc
+
+In procfs, each running process is represented by a directory /proc/{PID}. Each
 such directory contains dozens of files with information about a process,
 divided into groups. Let’s have a quick tour (note that $$ is a shell built-in
 variable, expanding to the current process’ PID):
 
-```
+```console
 $ ls -F /proc/$$
 attr/            exe@        mounts         projid_map    status
 autogroup        fd/         mountstats     root@         syscall
@@ -44,9 +50,9 @@ environ          mountinfo   personality    statm
 ```
 
 All these files have different and unique formats. Most are ASCII text, easily
-readable by a human. Or not.
+readable by a human. Except when it doesn't.
 
-```
+```console
 $ cat /proc/$$/stat
 24293 (bash) S 21811 24293 24293 34854 24876 4210688 6325 19702 0 10 15 7 33 35 20 0 1 0 47892016 135487488 3388 18446744073709551615 94447405350912 94447406416132 140729719486816 0 0 0 65536 3670020 1266777851 1 0 0 17 2 0 0 0 0 0 94447408516528 94447408563556 94447429677056 140729719494655 140729719494660 140729719494660 140729719496686 0
 ```
@@ -55,9 +61,22 @@ To understand this set of numbers, one needs to read proc(5) man page or kernel
 documentation. For example, the field number 2 is the file name of the
 executable, in parentheses, and the field number 19 is a process’ nice value.
 
-Some of /proc/<pid> files have more human readable formats:
+One might think that while this file is not very human-readable, parsing it
+by a program is fast and trivial, and that is true, unless the executable name
+contains spaces or, even worse, parentheses, none of which are escaped by the
+kernel:
 
+```console
+$ cp /bin/sleep 'ha ha ))) '
+$ ./ha\ ha\ \)\)\)\  1h
+[1] 7397
+$ cut -c-50 /proc/7397/stat
+7397 (ha ha ))) ) S 3859 7397 3859 34816 7412 1077
 ```
+
+Some of /proc/{PID} files have more human readable formats:
+
+```console
 $ cat /proc/$$/status | head -n 5
 Name:	bash
 Umask:	0002
@@ -66,31 +85,37 @@ Tgid:	24293
 Ngid:	0
 ```
 
-Now, how often do users look at these files directly? How much time it takes
-for the kernel to encode its internal binary data into text? What is the
-overhead of such pseudo file system? How good is this interface for developers
-of monitoring tools? How much time do these tool need to parse text data? How
-often do people have problems caused by bad performance of this interface in
-critical situations? These are the questions that comes to mind.
+The following questions come to mind:
 
-It would not be incorrect to say that users tend to use tools like ps or top
-rather than inspect raw files from procfs. To answer other questions, we need
-to do a few experiments. First of all, let’s find out where the kernel spends
+ * How often do users look at these files directly?
+ * How much time it takes for the kernel to encode its internal binary
+   data into text?
+ * What is the overhead of such pseudo file system?
+ * How good is this interface for developers of monitoring tools?
+ * How much time do these tool need to parse text data?
+ * How often do people have problems caused by bad performance of this
+   interface in critical situations?
+
+It would not be incorrect to say that the majority of users tend to use
+tools like `ps` or `top` rather than inspect raw files from procfs.
+
+To answer the other questions, we need
+to do a few experiments first. Let’s find out where the kernel spends
 the time to generate these files.
 
 We need to understand what has to be done to get information about all
-processes. For that, we have to read a content of the /proc/ directory and find
-all directories which names are decimal numbers. For each such directory, we
-need to open a file, read its content and close it.
+processes. For that, we have to read contents of the /proc/ directory and find
+all subdirectories which names are decimal numbers. For each such subdirectory,
+we need to open a file, read its content and close it.
 
-This results in three system calls have to be made, one of them creating a file
+This results in three system calls that have to be made, one of them creating a file
 descriptor, an operation that requires the kernel to allocate some internal
-objects. The open() and close() system calls don’t provide us with any
+objects. The `open()` and `close()` system calls do not provide us with any
 information, so we can say that the time spent calling those is the overhead
 from this interface.
 
-Here is the first experiment: call open() and close() for each process, without
-reading file’s content. In here we open and close every /proc/*/stat file:
+Here is the first experiment: call `open()` and `close()` for each process, without
+reading file contents. In here we open and close every `/proc/*/stat` file:
 
 ```
 $ time ./task_proc_all --noread stat
@@ -101,7 +126,7 @@ user	0m0.012s
 sys	0m0.162s
 ```
 
-Same for /proc/*/loginuid:
+Same for `/proc/*/loginuid`:
 
 ```
 $ time ./task_proc_all --noread loginuid
@@ -113,7 +138,7 @@ sys	0m0.145
 ```
 
 It doesn’t matter which file is opened, as its content is generated from the
-read system call, which we don’t use yet.
+`read()` system call, which we don’t use yet.
 
 
 Now, let’s take look at the corresponding perf output, to profile kernel
@@ -166,18 +191,18 @@ functions.
 Here we can see that the kernel spent roughly 75% of the time to create and
 destroy file descriptors, and about 16% to list processes.
 
-Now we know the time it takes to open() and close() one file per each process,
-but we can’t yet say how significant the overhead is is in the whole process,
-as we lack data for comparison. Let’s see try to read those files, choosing the
-“most popular” ones. It’s easy to find out which ones -- run ps or top under
-strace, see what it does. It appears that both these tools read at least
-/proc/{PID}/stat and /proc/{PID}/status for each process.
+Now we know the time it takes to `open()` and `close()` one file per each process,
+but we can’t yet say how significant the overhead is in the whole process,
+as we lack data for comparison. Let’s try to read those files, choosing the
+“most popular” ones. It’s easy to find out which ones -- run `ps` or `top` under
+`strace`, see what it does. It appears that both these tools read at least
+`/proc/{PID}/stat` and `/proc/{PID}/status` for each process.
 
 
-Let’s perform open/read/close on /proc/*/status. It is one of the bigger files
+Let’s perform open/read/close on `/proc/*/status`. It is one of the bigger files
 having a fixed number of fields.
 
-```
+```console
 $ time ./task_proc_all status
 tasks: 50283
 
@@ -185,6 +210,8 @@ real	0m0.455s
 user	0m0.033s
 sys	0m0.417s
 ```
+
+Perf output:
 ```
 -   93.84%     0.00%  task_proc_all    [unknown]                   [k] 0x0000000000008000
    - 0x8000
@@ -223,45 +250,40 @@ sys	0m0.417s
       + 4.10% __close
 ```
 
-We can see that only about 60% of the time was spent in read() syscalls. If we
-look at its detailed profile, we can find about 45% of the time was spent in
-functions like seq_printf, seq_put_decimal_ull, that do binary to text
-transformation. Apparently encoding binary data into a text format is not so
-cheap. Do we really need a human-readable interface to retrieve this data from
-the kernel? How often do we want to see the raw /proc contents? Why do tools
-like top and ps have to decode text data back into a binary format?
+We can see that only about 60% of the time was spent in `read()` syscalls. If we
+take a look at the detailed profile, we can see that about 45% of the time was spent in
+functions like `seq_printf`, `seq_put_decimal_ull` -- the ones that perform binary to text
+conversion. Apparently, encoding binary data into text is not that cheap.
 
-Perhaps you would like to know how fast could be an interface that
-uses a binary format rather than text for output data;
-does not require a minimum of three system calls and one file descriptor per process.
+Do we really need a human-readable interface to retrieve this data from
+the kernel? How often do we want to see the raw `/proc` contents? Why do tools
+like `top` and `ps` have to decode text data back into a binary format?
 
+Let's see how fast is an interface that
+ * uses a binary format (rather than text);
+ * does not require a minimum of three system calls and one file descriptor per process.
 
-To much surprise, the first such interface appeared in the Linux kernel back in 2004.
+To much surprise, the first such interface appeared in the Linux kernel back in 2004:
+[[0/2][ANNOUNCE] nproc: netlink access to /proc information](https://lwn.net/Articles/99600/)
 
-```
-[0/2][ANNOUNCE] nproc: netlink access to /proc information (https://lwn.net/Articles/99600/)
-```
-
-nproc is an attempt to address the current problems with /proc. In
-short, it exposes the same information via netlink (implemented for a
+This was an attempt to address the current problems with /proc. In
+short, it exposed the same information via netlink (implemented for a
 small subset).
 
 Unfortunately, the community didn’t show much interest in this work. The most
 recent attempt to introduce something like this has been made only two years
-ago. 
+ago: [[PATCH 0/15] task_diag: add a new interface to get information about processes](https://lwn.net/Articles/683371/).
+Let's see what it's all about.
 
-```
-[PATCH 0/15] task_diag: add a new interface to get information about processes (https://lwn.net/Articles/683371/)
-```
+The task-diag interface is based on the following principles:
 
-Let's see what it's all about. The task-diag interface is based on the following principles:
-* Transactional: write a request, read back a response
-* Netlink message format (binary and extendable; same as used by sock_diag)
-* Ability to specify a set of processes to get info about
-* Optimal grouping of attributes (any attribute in a group can't affect a response time)
+ * Transactional: write a request, read back a response
+ * Netlink message format (binary and extendable; same as used by `sock_diag`)
+ * Ability to specify a set of processes to get info about
+ * Optimal grouping of attributes (any attribute in a group can't affect a response time)
 
 This interface was presented at a few conferences. It was (experimentally)
-integrated into pstools and CRIU, and (to some degree) into the perf tool. All
+integrated into `pstools` and CRIU, and (to some degree) into the perf tool. All
 three experiments shown that performance is always better.
 
 The kernel community expressed some interest in this work. The primary debate
@@ -269,18 +291,18 @@ was about what transport should be used to transfer data between kernel and
 userspace. The initial idea to use netlink sockets was declined. Partly it was
 due to known unresolved issues in netlink code base, and partly due to a belief
 that the netlink interface was designed only for a network subsystem. It was
-suggested instead to use a transactional file in procfs, what means that a user
-opens a file, writes a request into a file descriptor, and then reads a
-response from it. As usual, there were people who didn’t like this approach
+suggested instead to use a transactional file in procfs, meaning that a user
+would open a file, write a request into a file descriptor, and then reads a
+response back from it. As usual, there were people who didn’t like this approach
 either. Alas, the solution accceptable by everyone has not been found yet. 
 
-Now let’s compare task_diag with procfs.
+Now let’s compare the proposed `task_diag` with traditional procfs.
+The task-diag code has a test tool, which can be used for our experiments.
 
-The task-diag code has a test tool, which can be used for our experiments. In
-the first experiment, we will get process PIDs and credentials. Here is an
-example of data that a test program gets for each process:
+In the first experiment, we will get process PIDs and credentials. Here is an
+example of data that a test program reads for each process:
 
-```
+```console
 $ ./task_diag_all one  -c -p $$
 pid  2305 tgid  2305 ppid  2299 sid  2305 pgid  2305 comm bash
 uid: 1000 1000 1000 1000
@@ -293,7 +315,7 @@ CapBnd: 0000003fffffffff
 
 Now let’s run it for the same set of processes what we used earlier with procfs.
 
-```
+```console
 $ time ./task_diag_all all  -c
 
 real	0m0.048s
@@ -304,7 +326,6 @@ sys	0m0.046s
 It only takes 0.05 seconds to get data enough to show a process tree. In case
 of procfs, we need 0.177 seconds to merely open and close one file per process,
 without even reading any data from it!
-
 
 Here is a perf output:
 
@@ -336,12 +357,12 @@ time-consuming functions to be optimized.
 
 Now let’s see how many system calls are needed to get information about all processes:                        
 
-```
- $ perf trace -s ./task_diag_all all -c  -q
+```console
+$ perf trace -s ./task_diag_all all -c  -q
 
- Summary of events:
+Summary of events:
 
- task_diag_all (54326), 185 events, 95.4%
+task_diag_all (54326), 185 events, 95.4%
 
    syscall            calls    total       min       avg       max      stddev
                                (msec)    (msec)    (msec)    (msec)        (%)
@@ -365,17 +386,17 @@ Now let’s see how many system calls are needed to get information about all pr
 ```
 
 In case of procfs, we need more than 150000 system calls to get this
-information, task_diag requires a bit more than 50.
+information, while task_diag requires a bit more than 50.
 
-Let’s look at the real workload. For example, we want to show a process tree
-with command lines for each process. For that, we need to know command line,
-pid and parent pid for each process.
+Let’s take a look at the real workload. For example, we want to show a process tree
+with command lines for each process. For that, we need to know the command line,
+the pid, and the parent pid for each process.
 
 In case of task_diag, the test program sends a request to get general
-information plus command lines for all processes and then reads requested
-information:
+information plus command lines for all processes and then reads the requested
+data back:
 
-```
+```console
 $ time ./task_diag_all all  --cmdline -q
 
 
@@ -384,9 +405,9 @@ user	0m0.006s
 sys	0m0.090s
 ```
 
-In case of procfs, we need to read two files /proc/pid/status and /proc/pid/cmdline.
+In case of procfs, we need to read two files per each process: `/proc/pid/status` and `/proc/pid/cmdline`.
 
-```
+```console
 $ time ./task_proc_all status
 tasks: 50278
 
@@ -395,7 +416,7 @@ user	0m0.030s
 sys	0m0.427s
 ```
 
-```
+```console
 $ time ./task_proc_all cmdline
 tasks: 50281
 
@@ -405,14 +426,14 @@ sys	0m0.237s
 ```
 
 Here we can see that task_diag is about 7 times faster than procfs (0.096 vs
-0.27 + 0.46). Usually, the increase of performance even for a few percents is a
+0.27 + 0.46). Usually, the increase of performance even by a few per cent is a
 good result. Here the effect is much more significant.
 
 Another thing to mention is a number of kernel allocations. This factor is
 critical when a system is under memory pressure. Let’s compare how many kernel
 allocations happen for procfs and task-diag.
 
-```
+```console
 $ perf trace --event 'kmem:*alloc*'  ./task_proc_all status 2>&1 | grep kmem | wc -l
 58184
 $ perf trace --event 'kmem:*alloc*'  ./task_diag_all all  -q 2>&1 | grep kmem | wc -l
@@ -421,7 +442,7 @@ $ perf trace --event 'kmem:*alloc*'  ./task_diag_all all  -q 2>&1 | grep kmem | 
 
 Let’s see how many allocations are required to run a trivial process:
 
-```
+```console
 $ perf trace --event 'kmem:*alloc*'  true 2>&1  | grep kmem | wc -l
 94
 ```
@@ -434,7 +455,7 @@ We hope that this article will attract more developers interested in improving
 this part of the kernel.
 
 Many thanks to David Ahern, Andy Lutomirski, Stephen Hemminger, Oleg Nesterov,
-W. Trevor King, Arnd Bergmann, Eric W. Biederman, and other people who help to
+W. Trevor King, Arnd Bergmann, Eric W. Biederman, and other people who helped to
 develop and improve the task diag interface.
 
 # Links
